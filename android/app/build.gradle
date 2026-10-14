@@ -13,8 +13,8 @@ android {
         // 对齐官方 APT App：targetSdk 28 走旧蓝牙权限模型，
         // Android 12+ 自动授予 SCAN/CONNECT，扫描结果不受新权限过滤影响
         targetSdk 28
-        versionCode 19
-        versionName "2.8.0"
+        versionCode 20
+        versionName "2.9.0"
     }
 
     buildTypes {
