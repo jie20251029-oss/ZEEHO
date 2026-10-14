@@ -1,6 +1,6 @@
 # ZEEHO 无线诊断（zeeho-diag）
 
-> 本项目基于 [cluck798](https://github.com/cluck798) 的开源项目 **zeeho-diag** 改进而来：新增安卓 App（SPP/BLE 双模连接）、iOS 26 浅色主题与布局重构、扫描/连接稳定性修复、双端 GitHub Actions 自动构建等。感谢原作者开源。
+> 本项目由 [cluck798](https://github.com/cluck798) 的开源项目 **zeeho-diag** 改编：新增安卓 App（SPP/BLE 双模连接）、iOS 26 浅色主题与布局重构、扫描/连接稳定性修复、双端 GitHub Actions 自动构建等。感谢原作者开源。
 
 极核（ZEEHO）电动摩托车无线诊断工具集：**iPhone / 电脑通过蓝牙适配器直连车辆诊断总线**，读取实时数据、执行 ABS 排气、胎压传感器匹配等维修操作。
 
