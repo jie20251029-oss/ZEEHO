@@ -1,0 +1,38 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.zeeho.diag'
+    compileSdk 35
+    buildToolsVersion '35.0.0'
+
+    defaultConfig {
+        applicationId "com.zeeho.diag"
+        minSdk 23
+        // 对齐官方 APT App：targetSdk 28 走旧蓝牙权限模型，
+        // Android 12+ 自动授予 SCAN/CONNECT，扫描结果不受新权限过滤影响
+        targetSdk 28
+        versionCode 19
+        versionName "2.8.0"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            shrinkResources false
+            // 用 debug 密钥签名，保证 release 包可直接安装（个人诊断工具，无需上架）
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    lint {
+        // targetSdk 28 对齐官方 APT App（旧蓝牙权限模型），侧载分发无需满足商店要求
+        disable 'ExpiredTargetSdkVersion'
+    }
+}

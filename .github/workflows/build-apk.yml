@@ -1,0 +1,52 @@
+name: build-apk
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - "android/**"
+      - ".github/workflows/build-apk.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-apk
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Accept Android SDK licenses
+        run: |
+          if [ -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
+            yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          fi
+
+      - name: Build APK
+        working-directory: android
+        run: ./gradlew assembleRelease --no-daemon
+
+      - name: Publish APK to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: diag-latest
+          name: 极核无线诊断（iOS IPA / 安卓 APK）
+          body: |
+            安卓 APK（debug 密钥签名，直接安装）。
+            - 配合 RS485 蓝牙模块（I6328A-485）或 ESP32-CAN 桥使用（详见仓库 README）
+            - 安装：手机开启「允许安装未知来源应用」后直接点击 APK 安装
+            - 构建提交：${{ github.sha }}
+          files: android/app/build/outputs/apk/release/app-release.apk
+          overwrite: true
+          make_latest: true
