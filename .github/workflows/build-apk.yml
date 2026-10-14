@@ -40,8 +40,8 @@ jobs:
       - name: Publish APK to release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: diag-latest
-          name: 极核无线诊断（iOS IPA / 安卓 APK）
+          tag_name: diag-latest-apk
+          name: 极核自主诊断 安卓 APK
           body: |
             安卓 APK（debug 密钥签名，直接安装）。
             - 配合 RS485 蓝牙模块（I6328A-485）或 ESP32-CAN 桥使用（详见仓库 README）
