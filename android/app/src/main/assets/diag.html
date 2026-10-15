@@ -180,6 +180,7 @@ button.big{width:100%;min-height:48px;font-size:15px;font-weight:600;margin-top:
       </div>
       <label class="hint"><input type="checkbox" id="chkFixedLen" checked style="flex:none;min-width:auto"/> 定长帧 71 字节（4346|系统|40|64字节负载|校验|4544）——车端只认完整帧；取消勾选可发短帧做对照测试</label>
       <div class="status" id="dataStatus">若数值大多显示"—"，先确认已连接模块，再检查下面收发日志里有没有 RX 行。</div>
+      <div class="status" id="rxStat">链路模式与接收统计显示在这里（连上模块后自动刷新）。</div>
       <div id="dsGrid" class="grid"></div>
       <div class="row">
         <select id="pSys" style="display:none"></select>
@@ -457,46 +458,96 @@ function rs485CkOk(frame) {
   for (var i = 2; i < b.length - 3; i++) sum = (sum + b[i]) & 0xFF;
   return sum === b[b.length - 3];
 }
+// 原始接收统计：判断"到底有没有收到东西"的两个关键数字
+var rxRawBytes = 0, rxRawChunks = 0, rxFrames = 0, modeWarned = false;
+function rxStats() {
+  var el = $('rxStat');
+  if (el) el.textContent = '链路模式：' + (linkMode === 'can' ? 'CAN（ESP32 桥）' : 'RS485（I6328A 模块）')
+    + ' · 原始 RX：' + rxRawBytes + ' 字节 / ' + rxRawChunks + ' 次通知'
+    + ' · 成功组帧：' + rxFrames + ' 帧'
+    + (rs485Rx.length ? ' · 待组帧缓冲 ' + (rs485Rx.length / 2) + 'B' : '');
+}
+function noteRaw(hex) {
+  rxRawBytes += hex.length / 2;
+  rxRawChunks++;
+  rxStats();
+}
 function handleRs485Frame(frame) {
+  rxFrames++;
   pushBuffer(frame);
   var ok = rs485CkOk(frame);
-  logLine('RX', frame, '(' + (frame.length / 2) + 'B' + (ok ? '' : '  校验不符') + ')');
-  if (!ok) logLine('SYS', '⚠ 响应校验不符：分包或成帧仍不对，请把这一行发给开发者');
+  logLine('SYS', '▶ 组帧成功 ' + (frame.length / 2) + 'B，校验' + (ok ? '正确' : '不符'));
+  if (!ok) logLine('SYS', '⚠ 校验不符：帧边界可能仍不对，请把上面那行 RX 原文发给开发者');
   autoParse(frame);
 }
 function rs485Feed(hex) {
-  rs485Rx += String(hex || '').toUpperCase().replace(/[^0-9A-F]/g, '');
+  var clean = String(hex || '').toUpperCase().replace(/[^0-9A-F]/g, '');
+  if (!clean) return;
+  // 任何到达的字节都立刻原样打印。这一步不能省：
+  // 若只在"凑成完整帧"时才打印，那么帧头不符 / 帧尾缺失 / 分包没凑齐
+  // 都会表现为"完全没有 RX"，会被误判成链路不通。
+  logLine('RX', clean, '(' + (clean.length / 2) + 'B)');
+  noteRaw(clean);
+  rs485Rx += clean;
   if (rs485Rx.length > RS485_RX_MAX) rs485Rx = rs485Rx.slice(-RS485_RX_MAX);
   var guard = 0;
   while (guard++ < 64) {
     var s = rs485Rx.indexOf('4346');
-    if (s < 0) { if (rs485Rx.length > 8) rs485Rx = rs485Rx.slice(-8); return; }
-    if (s > 0) rs485Rx = rs485Rx.slice(s);
+    if (s < 0) {
+      if (rs485Rx.length > 8) {
+        logLine('SYS', '⚠ 收到 ' + (rs485Rx.length / 2) + 'B 但没有 4346 帧头，已丢弃（尾部保留 4B）：' + rs485Rx.slice(-24));
+        rs485Rx = rs485Rx.slice(-8);
+        rxStats();
+      }
+      return;
+    }
+    if (s > 0) {
+      logLine('SYS', '⚠ 丢弃帧头之前的 ' + (s / 2) + 'B 杂散字节：' + rs485Rx.slice(0, s));
+      rs485Rx = rs485Rx.slice(s);
+      rxStats();
+    }
     var frame = null;
     var flen = RS485_FRAME_LEN * 2;
     if (rs485Rx.length >= flen && rs485Rx.slice(flen - 4, flen) === '4544') {
       frame = rs485Rx.slice(0, flen);        // 定长 71 字节帧
     } else {
       var e = rs485Rx.indexOf('4544', 4);
-      if (e < 0) return;                     // 还没收全，等下一个分包
+      if (e < 0) {
+        // 超过两个完整帧的十六进制长度还凑不出帧尾：帧头多半是脏数据（半截帧被遗弃），
+        // 必须丢掉 2B 重新同步，否则它会一直占住位置、把后面每一帧都对齐错位。
+        if (rs485Rx.length > RS485_FRAME_LEN * 4) {
+          logLine('SYS', '⚠ 缓冲已超过一个完整帧仍无帧尾 4544，判定帧头为脏数据，丢弃 2B 重新同步');
+          rs485Rx = rs485Rx.slice(2);
+          rxStats();
+          continue;
+        }
+        rxStats();
+        return;
+      }
       frame = rs485Rx.slice(0, e + 4);
     }
     rs485Rx = rs485Rx.slice(frame.length);
     handleRs485Frame(frame);
+    rxStats();
   }
 }
 
 // CAN 透传帧固定 11 字节（ID_H ID_L DLC D0..D7），同样需要重组
 var canRx = '';
 function canFeed(hex) {
-  canRx += String(hex || '').toUpperCase().replace(/[^0-9A-F]/g, '');
+  var clean = String(hex || '').toUpperCase().replace(/[^0-9A-F]/g, '');
+  if (!clean) return;
+  logLine('RX', clean, '(' + (clean.length / 2) + 'B)');
+  noteRaw(clean);
+  canRx += clean;
   while (canRx.length >= 22) {
     var f = canRx.slice(0, 22);
     canRx = canRx.slice(22);
     pushBuffer(f);
     canOnData(f);
   }
-  if (canRx.length > 88) canRx = '';
+  if (canRx.length > 88) { logLine('SYS', '⚠ CAN 接收缓冲异常，已重置'); canRx = ''; }
+  rxStats();
 }
 
 // ============ BLE 事件 ============
@@ -531,6 +582,7 @@ window.onR485Event = function (json) {
     var nm = (ev.name || '').toUpperCase();
     linkMode = (nm.indexOf('CAN') >= 0 || nm.indexOf('ESP32') >= 0) ? 'can' : 'rs485';
     applyMode();
+    rxStats();
     $('blePill').textContent = '已连接' + (ev.name ? ' ' + ev.name : '') + '（' + (linkMode === 'can' ? 'CAN' : 'RS485') + '）';
     $('blePill').className = 'pill ok';
     logLine('SYS', '已连接 ' + (ev.name || '') + '，链路模式：' + (linkMode === 'can' ? 'CAN' : 'RS485'));
@@ -642,9 +694,14 @@ function mkFrame(sysHex, payloadHex) {
 $('btnSend').onclick = function () {
   var hex = $('frame').value.replace(/[^0-9a-fA-F]/g, '').toUpperCase();
   if (!hex) { logLine('SYS', '无帧可发'); return; }
-  sendFrame(hex);
+  sendFrame(hex, true);
 };
-function sendFrame(hex) {
+// isRaw=true 表示来自「原始帧」实验工具，不做链路模式告警
+function sendFrame(hex, isRaw) {
+  if (!isRaw && linkMode === 'can' && !modeWarned) {
+    modeWarned = true;
+    logLine('SYS', '⚠ 当前链路是 CAN（连的是 ESP32 ZEEHO-CAN 桥），却在发 RS485 帧——CAN 桥会把 4346 当成 CAN 报文 ID，车端不会应答。请到「更多功能」把链路模式切成 RS485，或改连 I6328A-485 模块。');
+  }
   r485('send', hex, function (res) {
     if (res && res.ok) logLine('TX', hex, '(' + (hex.length / 2) + 'B)');
     else logLine('SYS', '发送失败（未连接？）');
