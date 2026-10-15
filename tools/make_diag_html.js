@@ -52,7 +52,13 @@ const SPE_RS485 = {
     "4346714000000000000040000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000F14544"
   ],
   tpmsFrame: "434617023808594544",
-  nfcTip: "NFC 学卡/删卡为短命令（操作码：学卡 3900→0D0100→放卡→0D0103；删卡 3A00→0D010103），成帧方式需实车实测；可先用\"自定义帧\"或原始帧输入框发送实验。"
+  // NFC 学卡/删卡为 SPEFUNC 短操作码（学卡 3900→0D0100→放卡→0D0103；删卡 3A00→0D010103）。
+  // 关键修复：这些操作码此前是"裸发"的（不带 4346/校验/4544），车端根本收不到合法帧，
+  // 所以页面提示只能写"若无响应属正常"。现在统一走 buildFrame() 成帧后发送。
+  nfcLearn: ["3900", "0D0100", "0D0103"],
+  nfcDelete: ["3A00", "0D010103"],
+  nfcSys: "89",
+  nfcTip: "操作码（学卡 3900→0D0100→放卡→0D0103；删卡 3A00→0D010103）已按 RS485 定长帧成帧发送：4346|系统码|40|64字节负载|校验|4544。若仍无响应，可点「原样发送」做对照，并把收发日志发给开发者。"
 };
 
 const DATA_JS = 'var SYS=' + JSON.stringify({ "49": "计量器/BMS", "51": "BMS 电池", "59": "MCU 电机", "81": "仪表/整车", "89": "TBOX/配置", "8B": "后雷达" }) + ';\n'
@@ -124,6 +130,67 @@ function bytes2hex(a) {
   return s.toUpperCase();
 }
 
+// ============ BLE 分包重组 ============
+// 透传模块的 BLE 通知受 MTU 限制通常被切成 20 字节一段，一个 71 字节的 RS485 帧会跨 4 段到达。
+// 原实现每收到一段就单独 autoParse，越界字节被当成 0 → 数据流表现为"有反应但数值全 0/乱码"。
+var rs485Rx = '';
+var RS485_RX_MAX = 8192;
+
+function pushBuffer(hex) {
+  buffers.unshift({ hex: hex, ts: Date.now() });
+  if (buffers.length > MAXBUF) buffers.pop();
+}
+function rs485CkOk(frame) {
+  var b = hex2bytes(frame);
+  if (b.length < 7) return false;
+  if (b[0] !== 0x43 || b[1] !== 0x46) return false;
+  if (b[b.length - 2] !== 0x45 || b[b.length - 1] !== 0x44) return false;
+  var sum = 0;
+  for (var i = 2; i < b.length - 3; i++) sum = (sum + b[i]) & 0xFF;
+  return sum === b[b.length - 3];
+}
+function handleRs485Frame(frame) {
+  pushBuffer(frame);
+  var ok = rs485CkOk(frame);
+  logLine('RX', frame, '(' + (frame.length / 2) + 'B' + (ok ? '' : '  校验不符') + ')');
+  if (!ok) logLine('SYS', '⚠ 响应校验不符：分包或成帧仍不对，请把这一行发给开发者');
+  autoParse(frame);
+}
+function rs485Feed(hex) {
+  rs485Rx += String(hex || '').toUpperCase().replace(/[^0-9A-F]/g, '');
+  if (rs485Rx.length > RS485_RX_MAX) rs485Rx = rs485Rx.slice(-RS485_RX_MAX);
+  var guard = 0;
+  while (guard++ < 64) {
+    var s = rs485Rx.indexOf('4346');
+    if (s < 0) { if (rs485Rx.length > 8) rs485Rx = rs485Rx.slice(-8); return; }
+    if (s > 0) rs485Rx = rs485Rx.slice(s);
+    var frame = null;
+    var flen = RS485_FRAME_LEN * 2;
+    if (rs485Rx.length >= flen && rs485Rx.slice(flen - 4, flen) === '4544') {
+      frame = rs485Rx.slice(0, flen);        // 定长 71 字节帧
+    } else {
+      var e = rs485Rx.indexOf('4544', 4);
+      if (e < 0) return;                     // 还没收全，等下一个分包
+      frame = rs485Rx.slice(0, e + 4);
+    }
+    rs485Rx = rs485Rx.slice(frame.length);
+    handleRs485Frame(frame);
+  }
+}
+
+// CAN 透传帧固定 11 字节（ID_H ID_L DLC D0..D7），同样需要重组
+var canRx = '';
+function canFeed(hex) {
+  canRx += String(hex || '').toUpperCase().replace(/[^0-9A-F]/g, '');
+  while (canRx.length >= 22) {
+    var f = canRx.slice(0, 22);
+    canRx = canRx.slice(22);
+    pushBuffer(f);
+    canOnData(f);
+  }
+  if (canRx.length > 88) canRx = '';
+}
+
 // ============ BLE 事件 ============
 window.onR485Event = function (json) {
   var ev; try { ev = JSON.parse(json); } catch (e) { return; }
@@ -168,10 +235,9 @@ window.onR485Event = function (json) {
     var txt = (ev.list || []).map(function (s) { return s.uuid + '(' + (s.chars || []).length + ')'; }).join('  ');
     $('svcInfo').textContent = '服务: ' + txt;
   } else if (ev.type === 'data') {
-    buffers.unshift({ hex: ev.hex, ts: Date.now() });
-    if (buffers.length > MAXBUF) buffers.pop();
-    if (linkMode === 'can') { canOnData(ev.hex); }
-    else { logLine('RX', ev.hex, '(' + ev.len + 'B)'); autoParse(ev.hex); }
+    // 累计到完整帧再解析（详见 BLE 分包重组）
+    if (linkMode === 'can') canFeed(ev.hex);
+    else rs485Feed(ev.hex);
   } else if (ev.type === 'tx') {
     // 发送回显已在 sendFrame 记过，这里略
   } else if (ev.type === 'disconnected') {
@@ -236,14 +302,34 @@ $('btnBuild').onclick = function () {
   var sys = $('sysSel').value.trim().toUpperCase();
   var payload = $('payload').value.replace(/[^0-9a-fA-F]/g, '').toUpperCase();
   if (!/^[0-9A-F]{2}$/.test(sys)) { logLine('SYS', '系统码需为 2 位十六进制'); return; }
-  $('frame').value = buildFrame(sys, payload);
+  $('frame').value = mkFrame(sys, payload);
 };
-function buildFrame(sysHex, payloadHex) {
-  var body = sysHex + '40' + payloadHex;
+// 车端 RS485 使用【定长完整帧】：4346 | 系统码 | 40 | 64字节负载(不足补0) | 校验 | 4544 = 71 字节。
+// 依据：仓库内所有"校验已验证"的帧（VIN 三步、特殊功能 Cmd01/02/03）都是 71 字节，
+// 连负载全 0 的请求也补满 64 字节；而 rs485_items.json 里最大 off=58，也正好装得下 64 字节负载。
+// 此前数据流请求只发 8 字节（4346|sys|40|ck|4544），车端收不到定长完整帧就不应答，
+// 所以安卓/iOS 表现一致：连接正常但一条 RX 都没有。
+var RS485_PAYLOAD_LEN = 64;
+var RS485_FRAME_LEN = 2 + 2 + RS485_PAYLOAD_LEN + 1 + 2;   // 71
+function buildFrame(sysHex, payloadHex, bare) {
+  var pay = (payloadHex || '').toUpperCase();
+  if (!bare) {
+    var want = RS485_PAYLOAD_LEN * 2;
+    while (pay.length < want) pay += '0';
+  }
+  var body = sysHex + '40' + pay;
   var bytes = hex2bytes(body);
   var ck = 0;
   for (var i = 0; i < bytes.length; i++) ck = (ck + bytes[i]) & 0xFF;
   return '4346' + body + bytes2hex([ck]) + '4544';
+}
+function fixedLenOn() {
+  var el = $('chkFixedLen');
+  return !el || el.checked;
+}
+// 统一入口：按界面开关决定是否补足 64 字节负载
+function mkFrame(sysHex, payloadHex) {
+  return buildFrame(sysHex, payloadHex, !fixedLenOn());
 }
 $('btnSend').onclick = function () {
   var hex = $('frame').value.replace(/[^0-9a-fA-F]/g, '').toUpperCase();
@@ -323,19 +409,54 @@ function canFrameHex(id, data8hex) {
   return s + '08' + data8hex;
 }
 
+// ISO-TP 多帧发送状态：首帧发出后必须等 ECU 的流控帧(0x30)再发连续帧，
+// 原实现按固定 30ms 连发 FF+CF，不符合 ISO-TP，稍长的写命令会被 ECU 直接丢弃。
+var canTx = null;
+var canTxTimer = null;
+
+function txCanFrame(id, f8, label) {
+  var frame = canFrameHex(id, f8);
+  r485('send', frame, function (res) {
+    if (res && res.ok) logLine('TX', frame, label ? ('[' + label + ']') : '');
+    else logLine('SYS', '发送失败（未连接？）');
+  });
+}
+function canTxFlush() {
+  if (canTxTimer) { clearTimeout(canTxTimer); canTxTimer = null; }
+}
+function canTxContinue() {
+  if (!canTx) return;
+  canTxFlush();
+  var job = canTx;
+  var gap = Math.max(5, job.stmin || 20);
+  function step() {
+    if (canTx !== job) return;
+    if (job.next >= job.frames.length) {
+      logLine('SYS', 'CAN 多帧发送完成（共 ' + job.frames.length + ' 帧）');
+      canTx = null;
+      return;
+    }
+    txCanFrame(job.id, job.frames[job.next], job.label);
+    job.next++;
+    canTxTimer = setTimeout(step, gap);
+  }
+  step();
+}
 function canSend(id, udsHex, label) {
   var frames = isotpFrames(udsHex);
   if (!frames.length) { logLine('SYS', 'CAN: UDS 无效'); return; }
   lastCanReqId = id;
-  frames.forEach(function (f8, i) {
-    setTimeout(function () {
-      var frame = canFrameHex(id, f8);
-      r485('send', frame, function (res) {
-        if (res && res.ok) logLine('TX', frame, label ? ('[' + label + ']') : '');
-        else logLine('SYS', '发送失败（未连接？）');
-      });
-    }, i * 30);
-  });
+  canTx = null;
+  canTxFlush();
+  if (frames.length === 1) { txCanFrame(id, frames[0], label); return; }
+  canTx = { id: id, frames: frames, next: 1, label: label, stmin: 20 };
+  txCanFrame(id, frames[0], label);
+  logLine('SYS', 'CAN 多帧：已发首帧，等待流控帧（0x30）…');
+  canTxTimer = setTimeout(function () {
+    if (!canTx) return;
+    logLine('SYS', '⚠ 未收到流控帧，仍按 20ms 间隔发送连续帧（非标准，但比完全不发更可能成功）');
+    canTxContinue();
+  }, 400);
 }
 
 var NRC_TEXT = { 0x10: '通用拒绝', 0x11: '服务不支持', 0x12: '子功能不支持', 0x13: '长度错误', 0x22: '条件不满足', 0x31: '请求超出范围', 0x33: '安全拒绝(需先解锁)', 0x35: '无效密钥', 0x78: '响应挂起' };
@@ -384,6 +505,13 @@ function canOnData(hex) {
   } else if ((pci & 0xF0) === 0x10) {
     canMulti = { total: ((pci & 0x0F) << 8) | (data[1] || 0), buf: data.slice(2) };
     r485('send', canFrameHex(lastCanReqId, '3008140000000000'), null); // 流控 BS=8 STmin=20ms
+  } else if ((pci & 0xF0) === 0x30) {
+    // 收到 ECU 的流控帧：BS=data[1]，STmin=data[2]（bit7=0 时为毫秒）
+    if (canTx) {
+      canTx.stmin = (data[2] & 0x7F) || 20;
+      logLine('SYS', '收到流控帧，继续发送连续帧（BS=' + (data[1] || 0) + '，STmin=' + canTx.stmin + 'ms）');
+      canTxContinue();
+    }
   } else if ((pci & 0xF0) === 0x20 && canMulti) {
     canMulti.buf = canMulti.buf.concat(data.slice(1));
     if (canMulti.buf.length >= canMulti.total) {
@@ -550,14 +678,61 @@ function speSendFrames(frames, label) {
 var bn = $('btnNfcInit');
 if (bn) bn.onclick = function () {
   speSendFrames(SPE_RS485.initMsgs, 'NFC 初始化');
-  var st = $('nfcStatus'); if (st) st.textContent = '已发送初始化序列。接下来可发送学卡命令（3900）…';
+  var st = $('nfcStatus'); if (st) st.textContent = '已发送初始化序列，接下来可发学卡命令…';
 };
+// ——— NFC 操作码发送：默认按 RS485 定长帧成帧 ———
+// 原实现把 3900 这类短操作码【原样裸发】，既没有 4346 帧头也没有校验和 4544 帧尾，
+// 车端收到的是两个孤立字节，必然无响应（页面提示只能写"若无响应属正常"）。
+function nfcSysHex() {
+  var el = $('nfcSys');
+  var v = ((el && el.value) || SPE_RS485.nfcSys || '89').trim().toUpperCase();
+  return /^[0-9A-F]{2}$/.test(v) ? v : '89';
+}
+function nfcSendOp(op, raw) {
+  if (raw) { sendFrame(op); logLine('TX', op, '（原样发送，未成帧）'); return op; }
+  var f = mkFrame(nfcSysHex(), op);
+  sendFrame(f);
+  return f;
+}
 var bc = $('btnNfcCmd');
 if (bc) bc.onclick = function () {
   var v = ($('nfcRaw').value || '').replace(/[^0-9a-fA-F]/g, '').toUpperCase();
   if (!v) return;
-  sendFrame(v);
-  var st = $('nfcStatus'); if (st) st.textContent = '已发送命令 ' + v + '，观察下方响应（如无响应说明成帧方式需实车调整）。';
+  var rawEl = $('chkNfcRaw');
+  var f = nfcSendOp(v, rawEl && rawEl.checked);
+  var st = $('nfcStatus'); if (st) st.textContent = '已发送：' + f + '（看下方响应）';
+};
+// 一键学卡 / 删卡：按操作码顺序成帧发送；学卡在 0D0100 之后留 6 秒放卡时间
+function nfcSeq(ops, label, placeCardAfter) {
+  logLine('SYS', 'NFC ' + label + ' 流程开始（共 ' + ops.length + ' 步）');
+  var i = 0;
+  function step() {
+    if (i >= ops.length) {
+      logLine('SYS', 'NFC ' + label + ' 流程结束');
+      var st = $('nfcStatus'); if (st) st.textContent = 'NFC ' + label + ' 流程已发完，请看下方响应。';
+      return;
+    }
+    var op = ops[i];
+    var f = nfcSendOp(op, false);
+    logLine('SYS', 'NFC ' + label + ' 第 ' + (i + 1) + '/' + ops.length + ' 步：' + op + ' → ' + f);
+    var needCard = (placeCardAfter === i);
+    i++;
+    if (needCard) {
+      var st2 = $('nfcStatus'); if (st2) st2.textContent = '已发 ' + op + '，请现在把新卡贴近车辆 NFC 区域…（6 秒）';
+    }
+    setTimeout(step, needCard ? 6000 : 800);
+  }
+  step();
+}
+var bl = $('btnNfcLearn');
+if (bl) bl.onclick = function () {
+  if (!confirm('学卡会写入车辆，确认已按维修流程操作？')) return;
+  nfcSeq(SPE_RS485.nfcLearn, '学卡', 1);
+};
+var bd = $('btnNfcDelete');
+if (bd) bd.onclick = function () {
+  if (!confirm('删卡会清除车辆已登记的全部卡片，确认继续？')) return;
+  nfcSeq(SPE_RS485.nfcDelete, '删卡', -1);
 };
 
 // ============ 官方诊断仪（实验）检测 ============
@@ -799,12 +974,20 @@ window.onWifiPortScan = function (r) {
 };
 
 // ============ 数据流解析 ============
+// base 指向响应帧里的【系统码】字节（findMarker 找到 sys|40 的位置），
+// 其后还有 1 个字节的命令码 40，所以数据首字节在 base+2。
+// rs485_items.json 的 off 是相对【数据首字节】的（如"电池电量" off=0，最大 off=58），
+// 原实现用 buf[base+off] 少加了 2，等于把系统码/命令码当成数据在算。
+var RS485_DATA_OFFSET = 2;
 function evalItem(it, buf, base) {
   var off = it.o;
   if (off == null) return null;
   var args = [];
   var n = (it.a && it.a.length) || 1;
-  for (var k = 0; k < n; k++) args.push(buf[base + off + k] != null ? buf[base + off + k] : 0);
+  for (var k = 0; k < n; k++) {
+    var idx = base + RS485_DATA_OFFSET + off + k;
+    args.push(buf[idx] != null ? buf[idx] : 0);
+  }
   try {
     if (it.k === 'v') {
       var fn = new Function((it.a || []).join(','), 'return (' + it.e + ');');
@@ -1008,7 +1191,7 @@ function dashRead() {
   dashSt('读取中：' + view.syses.join(' / ') + ' …');
   function next() {
     if (i >= view.syses.length) { dashSt('读取命令已发送，等待响应…'); return; }
-    sendFrame(buildFrame(view.syses[i], ''));
+    sendFrame(mkFrame(view.syses[i], ''));
     i++;
     setTimeout(next, 400);
   }
@@ -1285,7 +1468,8 @@ button.big{width:100%;min-height:48px;font-size:15px;font-weight:600;margin-top:
         <button class="chip" data-sys="8B">📶 后雷达</button>
         <button class="chip" id="btnVin">🔍 读 VIN</button>
       </div>
-      <div class="status" id="dataStatus">若数值大多显示"—"，检查读取帧或到「高级工具」手动调整。</div>
+      <label class="hint"><input type="checkbox" id="chkFixedLen" checked style="flex:none;min-width:auto"/> 定长帧 71 字节（4346|系统|40|64字节负载|校验|4544）——车端只认完整帧；取消勾选可发短帧做对照测试</label>
+      <div class="status" id="dataStatus">若数值大多显示"—"，先确认已连接模块，再检查下面收发日志里有没有 RX 行。</div>
       <div id="dsGrid" class="grid"></div>
       <div class="row">
         <select id="pSys" style="display:none"></select>
@@ -1348,7 +1532,15 @@ button.big{width:100%;min-height:48px;font-size:15px;font-weight:600;margin-top:
         <button id="btnNfcCmd" class="green">② 发送操作命令</button>
       </div>
       <input id="nfcRaw" placeholder="操作命令（默认学卡码 3900）" value="3900"/>
-      <div class="status" id="nfcStatus">流程：先点「初始化」，再发学卡命令 3900 → 0D0100 →（把新卡贴近车）→ 0D0103。删卡用 3A00 → 0D010103（会删除全部原厂卡）。短命令成帧待实车验证，若无响应属正常。</div>
+      <div class="row">
+        <input id="nfcSys" placeholder="系统码" value="89" style="max-width:110px"/>
+        <label class="hint"><input type="checkbox" id="chkNfcRaw" style="flex:none;min-width:auto"/> 原样发送（不成帧，仅用于对照）</label>
+      </div>
+      <div class="row">
+        <button id="btnNfcLearn" class="big green">③ 一键学卡（3900 → 0D0100 → 放卡 → 0D0103）</button>
+      </div>
+      <div class="row"><button id="btnNfcDelete" class="ghost">一键删卡（3A00 → 0D010103，清除全部卡）</button></div>
+      <div class="status" id="nfcStatus">流程：先点「初始化」，再点「一键学卡」，中途把新卡贴近车辆 NFC 区域。操作码现在会按定长帧成帧后发送。</div>
     </section>
     <section class="card">
       <h2>响应</h2>
@@ -1446,7 +1638,7 @@ button.big{width:100%;min-height:48px;font-size:15px;font-weight:600;margin-top:
         <input id="frame" placeholder="完整帧 hex"/>
         <button id="btnSend" class="green">发送</button>
       </div>
-      <div class="hint">帧格式：4346 | 系统 | 40 | payload | 校验 | 4544（校验自动计算）</div>
+      <div class="hint">帧格式：4346 | 系统码 | 40 | 64字节负载（不足自动补0） | 校验 | 4544 —— 共 71 字节定长帧，校验自动计算</div>
     </section>
     <section class="card">
       <h2>CAN 手动 UDS</h2>
@@ -1475,6 +1667,12 @@ ${LOGIC_JS}
 </html>
 `;
 
-const outPath = path.join(__dirname, '..', 'ios', 'App', 'Resources', 'diag.html');
-fs.writeFileSync(outPath, html, 'utf8');
-console.log('written ' + outPath + ', size=' + html.length + ' bytes, items=' + compact.length);
+// 同时写入 iOS 与安卓两份，避免两边 diag.html 长期漂移
+const outPaths = [
+  path.join(__dirname, '..', 'ios', 'App', 'Resources', 'diag.html'),
+  path.join(__dirname, '..', 'android', 'app', 'src', 'main', 'assets', 'diag.html')
+];
+outPaths.forEach(function (p) {
+  fs.writeFileSync(p, html, 'utf8');
+  console.log('written ' + p + ', size=' + html.length + ' bytes, items=' + compact.length);
+});

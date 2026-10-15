@@ -66,12 +66,15 @@ class ServerCB : public BLEServerCallbacks {
 // 收到 App 写入的 11 字节帧 -> 发到 CAN 总线
 class WriteCB : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic* c) override {
-    // 兼容 ESP32 Arduino 核心 2.x(String 返回值) 与 3.x(std::string 返回值)
-    String val = c->getValue().c_str();
-    size_t n = val.length();
-    if (n < 3) return;
-    uint16_t id = ((uint8_t)val[0] << 8) | (uint8_t)val[1];
-    uint8_t dlc = (uint8_t)val[2];
+    // 必须用 getData()/getLength() 取原始字节。
+    // getValue() 返回 String / 以 NUL 结尾的字符串，而 CAN 帧数据里经常出现 0x00，
+    // 一旦用 String 承接就会在第一个 0x00 处被截断——多帧写命令（如阀控制）后半段
+    // 非零字节会丢失，ISO-TP 校验不过，ECU 直接拒绝，表现为胎压/ABS 写操作无效。
+    uint8_t* raw = c->getData();
+    size_t n = c->getLength();
+    if (raw == nullptr || n < 3) return;
+    uint16_t id = ((uint16_t)raw[0] << 8) | (uint16_t)raw[1];
+    uint8_t dlc = raw[2];
     if (dlc > 8) dlc = 8;
     twai_message_t msg = {};
     msg.identifier = id;
@@ -79,7 +82,7 @@ class WriteCB : public BLECharacteristicCallbacks {
     msg.rtr = 0;
     msg.data_length_code = dlc;
     for (int i = 0; i < dlc; i++) {
-      msg.data[i] = (i + 3 < (int)n) ? (uint8_t)val[i + 3] : 0;
+      msg.data[i] = (i + 3 < (int)n) ? raw[i + 3] : 0;
     }
     if (twai_transmit(&msg, pdMS_TO_TICKS(50)) == ESP_OK) {
       Serial.printf("[CAN TX] %03X DLC=%d\n", id, dlc);

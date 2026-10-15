@@ -857,7 +857,10 @@ public class BleBridge {
         // 官方 App 同款写类型选择
         if ((props & BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0
                 && (props & BluetoothGattCharacteristic.PROPERTY_WRITE) == 0) {
-            writeChar.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);
+            // 修正：该特征只声明 WriteWithoutResponse，必须用 NO_RESPONSE 写。
+            // 原先误设为 WRITE_TYPE_DEFAULT，协议栈会以 GATT_WRITE_NOT_PERMITTED 拒绝，
+            // 表现为连接、订阅都正常但一条数据也发不出去（数据流/NFC/胎压全无响应）。
+            writeChar.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE);
             writeChar.setValue(data);
             try {
                 if (!gatt.writeCharacteristic(writeChar)) {
