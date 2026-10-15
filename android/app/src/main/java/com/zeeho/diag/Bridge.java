@@ -142,6 +142,8 @@ public class Bridge {
     /** 走系统分享面板把当前日志文件发出去 */
     private boolean shareLog() {
         DiagLog log = DiagLog.get(activity);
+        // 先把队列里已写的日志强制落盘，避免分享出去的文件缺最后几行
+        log.flushNow();
         File f = log.current();
         if (f == null || !f.exists()) {
             notifyError("日志文件尚未就绪，请稍等 1 秒后重试");

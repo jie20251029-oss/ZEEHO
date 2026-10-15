@@ -854,24 +854,11 @@ public class BleBridge {
     private boolean writeGatt(byte[] data) {
         if (gatt == null || writeChar == null) return false;
         int props = writeChar.getProperties();
-        // 官方 App 同款写类型选择
-        if ((props & BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0
-                && (props & BluetoothGattCharacteristic.PROPERTY_WRITE) == 0) {
-            // 修正：该特征只声明 WriteWithoutResponse，必须用 NO_RESPONSE 写。
-            // 原先误设为 WRITE_TYPE_DEFAULT，协议栈会以 GATT_WRITE_NOT_PERMITTED 拒绝，
-            // 表现为连接、订阅都正常但一条数据也发不出去（数据流/NFC/胎压全无响应）。
-            writeChar.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE);
-            writeChar.setValue(data);
-            try {
-                if (!gatt.writeCharacteristic(writeChar)) {
-                    emitError("写入失败");
-                    return false;
-                }
-            } catch (SecurityException e) {
-                emitError("写入失败：权限被拒");
-                return false;
-            }
-        } else {
+        boolean noRsp = (props & BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0;
+        boolean withRsp = (props & BluetoothGattCharacteristic.PROPERTY_WRITE) != 0;
+        if (noRsp) {
+            // NO_RESPONSE 写：必须手动按 MTU 分包——协议栈不会自动拆，超长部分会被静默截断
+            // （仅声明 WriteWithoutResponse 的特征用 DEFAULT 写会被 GATT_WRITE_NOT_PERMITTED 拒绝）
             writeChar.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE);
             int max = mtu > 0 ? Math.min(mtu - 3, 180) : 20;
             if (data.length <= max) {
@@ -888,6 +875,22 @@ public class BleBridge {
             } else {
                 writeChunks(data, 0, max);
             }
+        } else if (withRsp) {
+            // 仅声明 WRITE 的特征：用 DEFAULT（带响应），协议栈会自动拆包，无需手动分包
+            writeChar.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);
+            writeChar.setValue(data);
+            try {
+                if (!gatt.writeCharacteristic(writeChar)) {
+                    emitError("写入失败");
+                    return false;
+                }
+            } catch (SecurityException e) {
+                emitError("写入失败：权限被拒");
+                return false;
+            }
+        } else {
+            emitError("写特征不可写（缺少 WRITE/WRITE_NO_RESPONSE 属性）");
+            return false;
         }
         // 记录真实写入路径：MTU / 是否分包。分包过多时透传模块会把一整帧拆成几段发出，
         // 车端收到的就是残缺帧，这是"有 TX 无 RX"的重要嫌疑点，必须落进日志。

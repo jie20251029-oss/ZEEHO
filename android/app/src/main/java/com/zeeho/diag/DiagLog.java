@@ -100,9 +100,52 @@ public final class DiagLog {
         try {
             byte[] b = line.getBytes("UTF-8");
             out.write(b);
-            out.flush();
             bytes += b.length;
             lines++;
+            // 不做逐行 flush：数据流高频时每行同步落盘会拖慢日志队列并消耗电量。
+            // 改为 300ms 合并 flush（见 scheduleFlush），分享前用 flushNow() 强制落盘。
+        } catch (Exception ignored) {
+        }
+    }
+
+    private final java.util.concurrent.atomic.AtomicBoolean flushScheduled =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    /** 合并式落盘：300ms 内的写入攒成一次 flush，避免逐行同步 */
+    private void scheduleFlush() {
+        if (flushScheduled.compareAndSet(false, true)) {
+            io.execute(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        Thread.sleep(300);
+                    } catch (InterruptedException ignored) {
+                    }
+                    flushScheduled.set(false);
+                    flushLocked();
+                }
+            });
+        }
+    }
+
+    private void flushLocked() {
+        try {
+            if (out != null) out.flush();
+        } catch (Exception ignored) {
+        }
+    }
+
+    /** 等待队列内已有写入完成并强制落盘（分享日志前调用，阻塞约 ≤2 秒） */
+    public void flushNow() {
+        flushScheduled.set(false);
+        java.util.concurrent.Future<?> f = io.submit(new Runnable() {
+            @Override
+            public void run() {
+                flushLocked();
+            }
+        });
+        try {
+            f.get(2, java.util.concurrent.TimeUnit.SECONDS);
         } catch (Exception ignored) {
         }
     }
@@ -154,6 +197,7 @@ public final class DiagLog {
                 if (bytes > MAX_BYTES) rotateLocked();
             }
         });
+        scheduleFlush();
     }
 
     /** 当前日志文件（供分享用），可能尚未就绪（返回 null） */

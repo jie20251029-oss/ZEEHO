@@ -37,7 +37,15 @@ public class LogProvider extends ContentProvider {
             throw new FileNotFoundException("Provider 上下文不可用");
         }
         DiagLog log = DiagLog.get(getContext());
-        File f = log.current();
+        // 优先按 URI 里的文件名打开（分享后文件若已滚动也能读到分享时那份）；
+        // 找不到时回退到当前日志文件。
+        String name = uri.getLastPathSegment();
+        File f = null;
+        if (name != null && !name.isEmpty()) {
+            File candidate = new File(log.dirPath(), name);
+            if (candidate.exists()) f = candidate;
+        }
+        if (f == null) f = log.current();
         if (f == null || !f.exists()) {
             throw new FileNotFoundException("日志文件尚未就绪");
         }
