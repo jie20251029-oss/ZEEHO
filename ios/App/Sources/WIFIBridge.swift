@@ -185,6 +185,7 @@ final class WIFIBridge {
     private func emit(_ obj: [String: String]) {
         guard let d = try? JSONSerialization.data(withJSONObject: obj, options: []),
               let s = String(data: d, encoding: .utf8) else { return }
+        DiagLog.shared.write("EV", s)
         sink?(s)
     }
 }

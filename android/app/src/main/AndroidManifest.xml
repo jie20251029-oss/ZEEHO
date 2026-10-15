@@ -35,6 +35,13 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- 诊断日志分享：本工程未引入 androidx，用最小实现的 ContentProvider 顶替 FileProvider -->
+        <provider
+            android:name=".LogProvider"
+            android:authorities="com.zeeho.diag.logs"
+            android:exported="false"
+            android:grantUriPermissions="true" />
     </application>
 
 </manifest>

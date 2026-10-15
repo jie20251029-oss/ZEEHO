@@ -110,6 +110,10 @@ function logLine(dir, hex, extra) {
   el.appendChild(div);
   el.scrollTop = el.scrollHeight;
   if (el.childNodes.length > 400) el.removeChild(el.firstChild);
+  // 同一行也写入原生日志文件：排查时直接把文件导出发走即可，不用手抄屏幕日志
+  try {
+    if (typeof r485 === 'function') r485('log', dir + ' ' + hex + (extra ? '  ' + extra : ''), null);
+  } catch (e) {}
 }
 function hexToAscii(hex) {
   var s = '';
@@ -1145,6 +1149,35 @@ $('btnParse').onclick = function () {
 
 $('btnClr').onclick = function () { $('log').innerHTML = ''; buffers = []; };
 
+// ============ 诊断日志文件（原生日志，可直接导出发给开发者） ============
+function logRefresh() {
+  var el = $('logInfo');
+  if (typeof r485 !== 'function') { if (el) el.textContent = '原生日志不可用（需在 App 内运行）'; return; }
+  r485('logInfo', '', function (json) {
+    if (!el) return;
+    var o = null;
+    try { o = (typeof json === 'string') ? JSON.parse(json) : json; } catch (e) { o = null; }
+    if (!o || !o.path) { el.textContent = '拿不到日志文件信息（可能是旧版本 App）'; return; }
+    el.textContent = '文件：' + o.path
+      + '\\n大小：' + o.size + ' 字节 · ' + o.lines + ' 行'
+      + '\\n目录：' + o.dir;
+  });
+}
+var bls = $('btnLogShare');
+if (bls) bls.onclick = function () {
+  var el = $('logInfo');
+  if (typeof r485 !== 'function') { if (el) el.textContent = '需在 App 内运行'; return; }
+  r485('logShare', '', function () { logRefresh(); });
+};
+var bli = $('btnLogInfo');
+if (bli) bli.onclick = logRefresh;
+var blc = $('btnLogClear');
+if (blc) blc.onclick = function () {
+  if (!confirm('清空当前日志文件？（会删掉已记录的收发数据）')) return;
+  r485('logClear', '', function () { logRefresh(); });
+};
+setTimeout(logRefresh, 1500);
+
 // ============ 仪表盘（横屏「看数据流」） ============
 var DASH_DATA = {};   // sys -> { 名称: {v,u,f} }
 var DASH_VIEW = 'car';
@@ -1704,6 +1737,17 @@ button.big{width:100%;min-height:48px;font-size:15px;font-weight:600;margin-top:
         <button id="btnCanSend" class="green">发送</button>
       </div>
       <div class="hint">自动 ISO-TP 封装（单帧/多帧）；响应解读见各功能页</div>
+    </section>
+    <section class="card">
+      <h2>诊断日志文件</h2>
+      <div class="row">
+        <button id="btnLogShare" class="big green">📄 分享 / 导出日志文件</button>
+      </div>
+      <div class="row">
+        <button id="btnLogInfo" class="ghost">刷新日志信息</button>
+        <button id="btnLogClear" class="ghost">清空日志</button>
+      </div>
+      <div class="status" id="logInfo">所有 TX / RX / 蓝牙事件 / 组帧与告警都已写入日志文件，出问题时点「分享 / 导出」把文件发出来即可，不用手抄屏幕。</div>
     </section>
     <section class="card">
       <h2>收发日志</h2>

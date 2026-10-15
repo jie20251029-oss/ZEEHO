@@ -96,6 +96,15 @@ final class RS485BLEManager: NSObject {
         let withoutRsp = ch.properties.contains(.writeWithoutResponse)
         let type: CBCharacteristicWriteType = withoutRsp ? .withoutResponse : .withResponse
         let maxLen = max(20, min(p.maximumWriteValueLength(for: type), 180))
+        // 记录真实写入路径：MTU / 是否分包。分包过多时透传模块会把一整帧拆成几段发出，
+        // 车端收到的就是残缺帧，这是"有 TX 无 RX"的重要嫌疑点，必须落进日志。
+        DiagLog.shared.write("TX", clean.uppercased() + " (\(data.count)B)"
+            + " | type=" + (withoutRsp ? "withoutResponse" : "withResponse")
+            + " | maxWriteLen=" + String(p.maximumWriteValueLength(for: type))
+            + " max=" + String(maxLen)
+            + (data.count > maxLen
+               ? " | 分包 " + String((data.count + maxLen - 1) / maxLen) + " 次"
+               : " | 单次写入"))
         sendChunks(data: data, char: ch, type: type, maxLen: maxLen)
         emit(["type": "tx", "hex": clean.uppercased(), "len": data.count])
         return true
@@ -173,6 +182,8 @@ final class RS485BLEManager: NSObject {
 
     private func emit(_ obj: [String: Any]) {
         let s = jsonString(obj)
+        // 所有原生事件（含每一次 RX 原始字节、连接/服务/订阅结果、错误）同步写入日志文件
+        DiagLog.shared.write("EV", s)
         if let sink = sink {
             sink(s)
         }

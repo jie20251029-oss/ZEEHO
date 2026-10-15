@@ -24,6 +24,11 @@
 	<false/>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<!-- 让 Documents/logs 下的诊断日志能在「文件」App 里被直接取走 -->
+	<key>UIFileSharingEnabled</key>
+	<true/>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>需要通过蓝牙连接诊断模块（I6328A-485 / ESP32-CAN）与车辆通信</string>
 	<key>NSBluetoothPeripheralUsageDescription</key>

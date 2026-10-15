@@ -1,9 +1,14 @@
 package com.zeeho.diag;
 
+import android.content.ClipData;
+import android.content.Intent;
+import android.net.Uri;
 import android.webkit.JavascriptInterface;
 
 import org.json.JSONException;
 import org.json.JSONObject;
+
+import java.io.File;
 
 /**
  * Bridge — 页面层 window.Android.postMessage(json) 的原生分发器。
@@ -65,6 +70,20 @@ public class Bridge {
             case "send":
                 reply = obj("ok", ble.send(data));
                 break;
+            // ---- 诊断日志文件 ----
+            case "log":
+                // 页面侧的诊断行（组帧成功 / 校验不符 / 脏字节丢弃…）也落到同一个文件
+                DiagLog.get(activity).write("JS", data);
+                break;
+            case "logInfo":
+                reply = safeJson(DiagLog.get(activity).infoJson());
+                break;
+            case "logShare":
+                reply = obj("ok", shareLog());
+                break;
+            case "logClear":
+                reply = obj("ok", DiagLog.get(activity).clear());
+                break;
             case "state":
                 reply = ble.state();
                 break;
@@ -110,6 +129,47 @@ public class Bridge {
         } catch (JSONException ignored) {
         }
         return o;
+    }
+
+    private static JSONObject safeJson(String s) {
+        try {
+            return new JSONObject(s);
+        } catch (JSONException e) {
+            return new JSONObject();
+        }
+    }
+
+    /** 走系统分享面板把当前日志文件发出去 */
+    private boolean shareLog() {
+        DiagLog log = DiagLog.get(activity);
+        File f = log.current();
+        if (f == null || !f.exists()) {
+            notifyError("日志文件尚未就绪，请稍等 1 秒后重试");
+            return false;
+        }
+        Uri uri = LogProvider.uriFor(f.getName());
+        Intent i = new Intent(Intent.ACTION_SEND);
+        i.setType("text/plain");
+        i.putExtra(Intent.EXTRA_STREAM, uri);
+        i.putExtra(Intent.EXTRA_SUBJECT, "极核诊断日志 " + f.getName());
+        i.setClipData(ClipData.newUri(activity.getContentResolver(), "diaglog", uri));
+        i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        try {
+            activity.startActivity(Intent.createChooser(i, "发送诊断日志"));
+            return true;
+        } catch (Exception e) {
+            notifyError("没有可用的分享目标。日志文件路径：" + f.getAbsolutePath());
+            return false;
+        }
+    }
+
+    private void notifyError(String msg) {
+        JSONObject o = obj("type", "error");
+        try {
+            o.put("error", msg);
+        } catch (JSONException ignored) {
+        }
+        activity.eval("window.onR485Event&&window.onR485Event(" + o.toString() + ");");
     }
 
     public void destroy() {

@@ -108,6 +108,17 @@ final class ViewController: UIViewController, WKScriptMessageHandler {
         case "send":
             let ok = mgr.bleSendHex(payload)
             reply(ok ? "{\"ok\":true}" : "{\"ok\":false}")
+        // ---- 诊断日志文件 ----
+        case "log":
+            // 页面侧的诊断行（组帧成功 / 校验不符 / 脏字节丢弃…）也落到同一个文件
+            DiagLog.shared.write("JS", payload)
+            reply(nil)
+        case "logInfo":
+            reply(DiagLog.shared.infoJSON())
+        case "logShare":
+            reply(shareLog() ? "{\"ok\":true}" : "{\"ok\":false}")
+        case "logClear":
+            reply(DiagLog.shared.clear() ? "{\"ok\":true}" : "{\"ok\":false}")
         case "state":
             reply(mgr.bleState())
         case "scanState":
@@ -162,6 +173,31 @@ final class ViewController: UIViewController, WKScriptMessageHandler {
             reply(nil)
         default:
             reply(nil)
+        }
+    }
+
+    /// 走系统分享面板把当前日志文件发出去
+    private func shareLog() -> Bool {
+        guard let url = DiagLog.shared.currentURL(),
+              FileManager.default.fileExists(atPath: url.path) else {
+            notifyError("日志文件尚未就绪，请稍等 1 秒后重试")
+            return false
+        }
+        let vc = UIActivityViewController(activityItems: [url], applicationActivities: nil)
+        if let pop = vc.popoverPresentationController {
+            pop.sourceView = view
+            pop.sourceRect = CGRect(x: view.bounds.midX, y: view.bounds.midY, width: 0, height: 0)
+        }
+        present(vc, animated: true)
+        return true
+    }
+
+    private func notifyError(_ msg: String) {
+        var out: [String: Any] = ["type": "error"]
+        out["error"] = msg
+        if let d = try? JSONSerialization.data(withJSONObject: out),
+           let s = String(data: d, encoding: .utf8) {
+            evaluateJS("window.onR485Event&&window.onR485Event(\(s));")
         }
     }
 

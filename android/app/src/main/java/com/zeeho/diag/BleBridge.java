@@ -889,6 +889,15 @@ public class BleBridge {
                 writeChunks(data, 0, max);
             }
         }
+        // 记录真实写入路径：MTU / 是否分包。分包过多时透传模块会把一整帧拆成几段发出，
+        // 车端收到的就是残缺帧，这是"有 TX 无 RX"的重要嫌疑点，必须落进日志。
+        int maxInfo = mtu > 0 ? Math.min(mtu - 3, 180) : 20;
+        DiagLog.get(activity).write("TX", bytesToHex(data) + " (" + data.length + "B)"
+                + " | props=0x" + Integer.toHexString(props)
+                + " | mtu=" + mtu + " max=" + maxInfo
+                + (data.length > maxInfo
+                ? " | 分包 " + ((data.length + maxInfo - 1) / maxInfo) + " 次"
+                : " | 单次写入"));
         JSONObject o = put(evt("tx"), "hex", bytesToHex(data));
         put(o, "len", data.length);
         emit(o);
@@ -1023,6 +1032,8 @@ public class BleBridge {
 
     private void emit(JSONObject o) {
         String s = o.toString().replace("\u2028", "\\u2028").replace("\u2029", "\\u2029");
+        // 所有原生事件（含每一次 RX 原始字节、连接/服务/订阅结果、错误）同步写入日志文件
+        DiagLog.get(activity).write("EV", s);
         activity.eval("window.__r485Event&&window.__r485Event(" + s + ");");
     }
 
