@@ -1034,7 +1034,10 @@ public class BleBridge {
         String s = o.toString().replace("\u2028", "\\u2028").replace("\u2029", "\\u2029");
         // 所有原生事件（含每一次 RX 原始字节、连接/服务/订阅结果、错误）同步写入日志文件
         DiagLog.get(activity).write("EV", s);
-        activity.eval("window.__r485Event&&window.__r485Event(" + s + ");");
+        // ⚠ 必须以【JSON 字符串字面量】回推：页面按 JSON.parse(str) 解析事件。
+        // 直接拼对象字面量时页面拿到的是对象，JSON.parse(对象) 会转成 "[object Object]"
+        // 后抛错并被 catch 吞掉，导致【所有原生事件被静默丢弃】——只表现为"只有 TX"。
+        activity.eval("window.__r485Event&&window.__r485Event(" + JSONObject.quote(s) + ");");
     }
 
     public void destroy() {

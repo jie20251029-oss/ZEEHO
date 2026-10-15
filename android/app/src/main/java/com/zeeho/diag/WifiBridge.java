@@ -306,7 +306,8 @@ public class WifiBridge {
     }
 
     private void emit(JSONObject o) {
-        activity.eval("window.onWifiEvent&&window.onWifiEvent(" + o.toString() + ");");
+        // 与 BLE 桥一致：按 JSON 字符串字面量回推（页面已两种形式都容错）
+        activity.eval("window.onWifiEvent&&window.onWifiEvent(" + JSONObject.quote(o.toString()) + ");");
     }
 
     /** 错误翻译（对照 iOS 版 POSIX 错误码） */

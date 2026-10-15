@@ -169,7 +169,8 @@ public class Bridge {
             o.put("error", msg);
         } catch (JSONException ignored) {
         }
-        activity.eval("window.onR485Event&&window.onR485Event(" + o.toString() + ");");
+        // 同样按 JSON 字符串字面量回推
+        activity.eval("window.__r485Event&&window.__r485Event(" + JSONObject.quote(o.toString()) + ");");
     }
 
     public void destroy() {

@@ -566,8 +566,22 @@ function canFeed(hex) {
 }
 
 // ============ BLE 事件 ============
+// 原生事件既可能以 JSON 字符串字面量回推，也可能被直接注入成对象字面量
+// （window.__r485Event({...})）。统一在这里容错，避免再被注入方式绑死。
+//
+// ⚠ 历史事故：这里原本写死 JSON.parse(json)。原生桥注入的是对象字面量，
+// JSON.parse(对象) 会先把对象转成字符串 "[object Object]" 再抛 SyntaxError，
+// 被 catch 吞掉后直接 return —— 结果是【所有原生事件被静默丢弃】：
+// RX 日志、组帧解析、连接/服务/订阅状态、UDS 响应全部失效。
+// 而 TX 走的是命令回调通道（window.__r485Cb），不经过这里，所以表现为"只有 TX"。
+function parseEv(x) {
+  if (x == null) return null;
+  if (typeof x === 'object') return x;
+  try { return JSON.parse(x); } catch (e) { return null; }
+}
 window.onR485Event = function (json) {
-  var ev; try { ev = JSON.parse(json); } catch (e) { return; }
+  var ev = parseEv(json);
+  if (!ev || !ev.type) return;
   if (ev.type === 'state') {
     var pill = $('blePill');
     var m = { poweredOn: '蓝牙已就绪', poweredOff: '蓝牙未开启', unauthorized: '无蓝牙权限', unsupported: '不支持蓝牙' };
@@ -1162,6 +1176,7 @@ function wifiSt(t) { var el = $('wifiStatus'); if (el) el.textContent = t; }
 function wLog(t) { logLine('WIFI', t); }
 function wUdsOf(pdu) { return pdu.slice(16); }
 window.onWifiEvent = function (ev) {
+  ev = parseEv(ev);
   if (!ev || !ev.type) return;
   if (ev.type === 'connected') {
     WD.conn = true;
@@ -1311,6 +1326,7 @@ if (ws) ws.onclick = function () {
   r485('wifiSelfCheck', ($('wifiPort').value || '13400'), null);
 };
 window.onWiFiSelfCheck = function (r) {
+  r = parseEv(r);
   var so = $('wifiScanOut');
   if (!r) { if (so) so.textContent = '自检无响应'; return; }
   var lines = [];
@@ -1340,6 +1356,7 @@ if (wps) wps.onclick = function () {
   r485('wifiPortScan', h, null);
 };
 window.onWifiPortScan = function (r) {
+  r = parseEv(r);
   var so = $('wifiScanOut');
   if (!r) { if (so) so.textContent = '端口扫描无响应'; return; }
   var open = r.open || [];

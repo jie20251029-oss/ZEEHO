@@ -56,17 +56,17 @@ final class ViewController: UIViewController, WKScriptMessageHandler {
             wv.trailingAnchor.constraint(equalTo: view.trailingAnchor)
         ])
 
-        // BLE 事件 → 网页层
+        // BLE 事件 → 网页层（必须以 JSON 字符串字面量回推，见 jsLiteral 注释）
         RS485BLEManager.sharedInstance().sink = { [weak self] json in
             DispatchQueue.main.async {
-                self?.evaluateJS("window.__r485Event&&window.__r485Event(\(json));")
+                self?.evaluateJS("window.__r485Event&&window.__r485Event(\(Self.jsLiteral(json)));")
             }
         }
 
         // WiFi(DoIP) 事件 → 网页层
         WIFIBridge.shared.sink = { [weak self] json in
             DispatchQueue.main.async {
-                self?.evaluateJS("window.onWifiEvent&&window.onWifiEvent(\(json));")
+                self?.evaluateJS("window.onWifiEvent&&window.onWifiEvent(\(Self.jsLiteral(json)));")
             }
         }
 
@@ -199,6 +199,23 @@ final class ViewController: UIViewController, WKScriptMessageHandler {
            let s = String(data: d, encoding: .utf8) {
             evaluateJS("window.onR485Event&&window.onR485Event(\(s));")
         }
+    }
+
+    /// 把 JSON 文本转成 JS 字符串字面量（含外层引号）。
+    ///
+    /// ⚠ 必须这样做：页面按 JSON.parse(str) 解析事件。若把 JSON 直接拼进
+    /// evaluateJavaScript（window.__r485Event({...})），页面拿到的是对象，
+    /// JSON.parse(对象) 会转成 "[object Object]" 后抛错并被 catch 吞掉，
+    /// 结果是【所有原生事件被静默丢弃】，只有走命令回调的 TX 能显示。
+    private static func jsLiteral(_ s: String) -> String {
+        guard let data = try? JSONEncoder().encode(s),
+              var literal = String(data: data, encoding: .utf8) else {
+            return "\"\""
+        }
+        // U+2028/U+2029 在 JSON 里合法，但在旧版 JS 字符串字面量里是换行符，需转义
+        literal = literal.replacingOccurrences(of: "\u{2028}", with: "\\u2028")
+                         .replacingOccurrences(of: "\u{2029}", with: "\\u2029")
+        return literal
     }
 
     private func evaluateJS(_ js: String) {
